@@ -1,98 +1,105 @@
-# df-analyze — Adaptive Error Rate (aER) + Multi‑Target Learning Integration
+# df-analyze — Adaptive Error Rate (aER) & Multi-Target Learning Integration  
+
+Based on the original **df-analyze** framework developed by Derek Berger in the Medical Imaging & Bioinformatics Lab, under the supervision of Jacob Levman at St. Francis Xavier University (StFX), Nova Scotia, Canada.  
+Upstream repository: https://github.com/stfxecutables/df-analyze/tree/experimental
+
 
 This README covers two newer additions to **df-analyze**:
 
-1. **Adaptive Error Rate (aER)**: a calibration/reliability layer that gives you *per-sample expected error estimates*, *risk–coverage curves*, and *risk-controlled thresholds* for selective prediction.
-2. **Multi-target learning**: run df-analyze on **multiple target columns** in one go, including multi-target support for **KNN**, **CatBoost**, and **Dummy**.
+1. **Adaptive Error Rate (aER)**  
+   Adaptive Error Rate (aER) provides per-sample error rate estimation for supervised machine learning models.  
+   In typical laboratory validation, model performance is summarized by a single aggregate error rate over an entire dataset. While useful, such global metrics do not reflect how prediction reliability can vary substantially across individual samples.
 
-This file is not meant to replace your “main” df-analyze README. It’s just the delta: what changed, how it plugs into the existing pipeline, and what new output artifacts to expect.
+   aER addresses this limitation by relating a model’s confidence to its expected prediction error, producing an *adaptive, sample-specific error estimate*. In a clinical setting, for example, binary cancer vs. non-cancer diagnosis, different patients may receive predictions with markedly different expected error rates. By exposing this information, aER enables clinician-users to better assess the reliability of individual predictions rather than relying solely on population-level performance statistics.
 
----
+2. **Multi-target learning**  
+   Multi-target learning extends `df-analyze` to support datasets with multiple target columns within a single run. This integration currently includes native multi-target support for **KNN**, **CatBoost**, and **Dummy** models.  
+   Other models in the `df-analyze` framework are not yet multi-target enabled but may be extended in future releases.
 
-<!-- omit from toc -->
-## Contents
-
-- [1. Concepts and terminology](#1-concepts-and-terminology)
-- [2. Quickstart: enabling aER and multi-target](#2-quickstart-enabling-aer-and-multi-target)
-- [3. Adaptive Error Rate (aER)](#3-adaptive-error-rate-aer)
-  - [3.1 Research alignment](#31-research-alignment)
-  - [3.2 How aER is integrated into the df-analyze pipeline](#32-how-aer-is-integrated-into-the-df-analyze-pipeline)
-  - [3.3 Practical adaptations made for df-analyze](#33-practical-adaptations-made-for-df-analyze)
-  - [3.4 aER configuration options](#34-aer-configuration-options)
-  - [3.5 aER outputs: files and figures](#35-aer-outputs-files-and-figures)
-- [4. Multi-target learning](#4-multi-target-learning)
-  - [4.1 How multi-target is integrated into df-analyze](#41-how-multi-target-is-integrated-into-df-analyze)
-  - [4.2 Multi-target feature selection aggregation](#42-multi-target-feature-selection-aggregation)
-  - [4.3 Multi-target models](#43-multi-target-models)
-- [5. Output changes in multi-target mode](#5-output-changes-in-multi-target-mode)
-- [6. Developer map: where the integrations live](#6-developer-map-where-the-integrations-live)
-
----
-
-## 1. Concepts and terminology
+## Concepts and terminology
 
 ### Adaptive Error Rate (aER)
 
-In a typical classification run, a model gives you:
+In standard supervised classification tasks, a machine learning model typically produces two outputs for each input sample:  
+(1) a predicted class label, and  
+(2) an associated confidence score, usually derived from predicted class probabilities.
 
-- a predicted label \(\hat{y}(x)\), and
-- some “confidence-ish” signal (usually derived from probabilities).
+In conventional evaluation, model performance is summarized by a *single global error rate* (e.g., overall accuracy or misclassification rate), computed across an entire dataset. While informative at the population level, this aggregate metric obscures substantial variability in prediction reliability across individual samples.
 
-**Adaptive Error Rate (aER)** takes that confidence signal and turns it into an *estimated probability of being wrong*, per sample:
+**Adaptive Error Rate (aER)** addresses this limitation by transforming the confidence score into an estimate of the *probability that a specific prediction is incorrect*, on a per-sample basis. Formally, for a prediction made on a given sample \(x\), aER represents the expected error rate conditioned on the confidence level of that prediction:
 
-- **aER(x)** ≈ “For predictions that look like this, how often is the model incorrect?”
+- **aER(x)** ≈ *P(prediction is incorrect ∣ confidence level of x)*
 
-This is different from accuracy:
+This formulation enables error estimation at the individual-sample level rather than relying on dataset-wide averages.
 
-- **accuracy** is an average over a dataset
-- **aER** is a per-sample risk estimate, mainly for *reliability diagnostics* and *selective prediction* (abstaining when the risk looks too high)
+Empirically, this distinction is critical in clinical and biomedical applications. Even when a dataset exhibits a low overall error rate (for example, approximately 3%), individual predictions may still carry substantially higher risk. In practice, certain cases can exhibit adaptive error rates exceeding 30%, clearly signaling increased uncertainty and reduced reliability for specific predictions. Such high-risk cases are effectively invisible when only global accuracy metrics are reported.
 
-### Confidence metric
+By exposing this sample-level variability, aER provides an explicit and interpretable estimate of prediction risk, enabling clinicians to evaluate the reliability of each diagnosis individually and supporting informed decision-making in high-stakes settings.
 
-A “confidence metric” here is just a scalar that moves in the right direction as predictions get more certain.
+In contrast to standard performance metrics:
 
-In the thesis framing, confidence usually comes from predicted probabilities (binary or multiclass). In df-analyze, confidence can be:
+- **Overall accuracy** summarizes performance as a single dataset-level average.
+- **Adaptive Error Rate (aER)** provides a sample-specific estimate of prediction risk, enabling fine-grained reliability analysis and individualized risk assessment.
 
-- probability-derived (e.g. probability margin),
-- KNN-flavoured (e.g. vote fraction, neighbour-distance proxy),
-- and model-specific signals where it makes sense (kept mainly so the interface stays consistent even if you swap models).
 
-By default df-analyze picks a confidence metric for you (see §3.2 Step 4), unless you pin it with `--aer-confidence-metric`.
+### Confidence Metric
+
+A *confidence metric* is a scalar quantity that reflects the reliability of a model’s prediction for a given sample. An effective confidence metric should vary monotonically with actual prediction accuracy.
+
+In the context of this research, confidence metrics are primarily derived from predicted class probabilities produced by calibrated models. Within `df-analyze`, confidence metrics may be computed using:
+
+- probability-based measures (e.g., probability margins or the difference between the highest and second-highest predicted class probabilities),
+- model-specific indicators, such as vote fractions or distance-based proxies used in instance-based models like K-Nearest Neighbors.
+
+Although confidence values are useful internally, they are often difficult to interpret directly—particularly for non-technical users—because the same numerical confidence value may correspond to very different reliability levels across models. For this reason, confidence metrics are not exposed directly as the primary reliability signal.
+
+Instead, confidence values are systematically *mapped to expected error rates*, yielding adaptive error estimates that share a common and intuitive interpretation across models.
+
+By default, `df-analyze` automatically selects the most effective confidence metric based on validation performance. This behavior can be overridden explicitly using the `--aer-confidence-metric` option when controlled experimentation or reproducibility requirements demand a fixed metric.
+
+This adaptive selection process ensures that each learner employs the confidence metric best suited for accurately predicting its own error rates, thereby enhancing the interpretability and reliability of the resulting adaptive error estimates.
+
+
 
 ### Out-of-fold (OOF) predictions
 
-To estimate aER without leakage, df-analyze builds **out-of-fold predictions** on the training split:
+To estimate aER without data leakage, `df-analyze` relies on **out-of-fold (OOF) predictions** constructed from the training split:
 
-- split training data into K folds
-- for each fold: train on K−1 folds, predict on the held-out fold
-- concatenate those held-out predictions
+- the training data are divided into \(K\) folds;
+- for each fold, the model is trained on \(K-1\) folds and evaluated on the held-out fold;
+- predictions from all held-out folds are then concatenated.
 
-That way, every training sample gets a prediction from a model that **did not train on that sample**. Those OOF predictions act as the calibration data for learning the mapping from confidence → expected error.
+As a result, every training sample receives a prediction from a model that **was not trained on that sample**. These OOF predictions serve as the calibration data for learning the mapping from confidence to expected error.
+
 
 ### Risk–coverage curve (selective prediction)
 
-Selective prediction means the model is allowed to **abstain** on uncertain cases.
+Selective prediction allows a model to **abstain** from making predictions on samples that are estimated to be unreliable.
 
-- **Coverage**: fraction of samples you *do* predict on (don’t abstain)
-- **Risk**: error rate among the samples you accepted
+- **Coverage** denotes the fraction of samples for which the model issues a prediction (i.e., does not abstain).
+- **Risk** is the observed error rate among those accepted predictions.
 
-Sweeping an acceptance threshold gives a **risk–coverage** curve, and you can pick risk-controlled operating points (“predict only when aER ≤ t”).
+By sweeping an acceptance threshold over the adaptive error rate, one obtains a **risk–coverage curve**, which explicitly characterizes the trade-off between prediction availability and reliability. As coverage decreases corresponding to rejecting higher-risk samples, the risk among accepted predictions typically decreases.
+
+This curve enables the selection of *risk-controlled operating points*, such as enforcing policies of the form:  
+“Only issue predictions when aER ≤ \(t\).”
+
+In high-stakes applications, this provides a principled mechanism for integrating uncertainty into decision making, allowing unreliable predictions to be deferred to human review rather than being presented with misleading confidence.
+
+
 
 ### Multi-target learning (multi-output)
 
-In this README, **multi-target** means:
+In this README, **multi-target learning** refers to scenarios in which:
 
-- you have multiple targets \(y_1, y_2, \dots, y_T\)
-- df-analyze trains and evaluates in one run, reporting per-target results
-- target-dependent stages (selection, univariate reports, aER) are run per target, and then combined where needed so the pipeline stays coherent
+- a dataset contains multiple target variables
+- `df-analyze` trains and evaluates models for all targets within a single execution;
+- target-dependent stages (e.g., feature selection, univariate analyses, and aER estimation) are performed separately for each target, then aggregated where necessary to maintain a coherent end-to-end pipeline.
 
-This is multi-output learning. It doesn’t assume your targets are dependent; for some models (CatBoost/Dummy) df-analyze simply trains one model per target under a single wrapper.
 
----
+## Quickstart: enabling aER and multi-target
 
-## 2. Quickstart: enabling aER and multi-target
-
-### 2.1 Enable aER (single-target classification)
+### Enable aER (single-target classification)
 
 ```bash
 python df-analyze.py   --df path/to/data.csv   --mode classify   --target outcome   --adaptive-error
@@ -135,89 +142,40 @@ How per-target aER is produced in multi-target runs:
 - For “one estimator per target” wrappers (CatBoost/Dummy), it selects the target-specific estimator.
 - For natively multi-output models (KNN), a lightweight wrapper slices the multi-output predictions down to a single target.
 
-The goal is to keep the aER implementation itself simple/single-target while still supporting multi-target datasets.
 
----
+##  Adaptive Error Rate (aER)
 
-## 3. Adaptive Error Rate (aER)
+### Research alignment
 
-### 3.1 Research alignment
-
-df-analyze’s aER implementation is meant to track the thesis methodology closely, but it’s integrated into df-analyze’s existing pipeline (single train/test split + CV-based tuning), so a few practical compromises show up later in §3.3.
-
-It aligns with (naming as in the project):
-
-- **Xuchen_Guo_MSc_Thesis** (definitions/assumptions/method)
-- **my_thesis_topic_oooo** (motivation + “clinician-facing” output style)
-
-At a high level, the structure mirrors:
-
-- **Thesis §2.1.2**: probability-derived confidence metrics (binary + multiclass)
-- **Thesis §2.1.3**: aER definition \(\mathrm{aER}(x)\) and the confidence→error mapping \(h(c)\), estimated via binning + a global-error prior
-- **Thesis §2.1.4–2.1.5**: selective prediction + risk-controlled thresholds using conservative bounds
-- **Thesis §2.6**: ensemble extensions driven by risk estimates
-
-The `clinician_view.*` and “high-risk case” outputs are included specifically to support the intended “flag risky predictions for review” workflow described in the thesis topic document.
-
-#### 3.1.1 What the thesis defines (conceptually)
+df-analyze’s aER implementation is meant to track the thesis "Sample-Based Error Rate Assessment Through
+Predictive Confidence in Biomedical Applications" methodology closely, but it’s integrated into df-analyze’s existing pipeline (single train/test split + CV-based tuning)
 
 The core ideas are:
 
 1. Compute a **confidence** value (usually from probabilities).
-2. Learn a mapping \(h(c)\) from confidence \(c\) to empirical error probability:
-   - \(h(c) \approx \Pr(\hat{y}(x) \neq y(x) \mid c(x) = c)\)
-3. Define **Adaptive Error Rate** as:
-   - \(\text{aER}(x) = h(c(x))\)
+2. Learn a mapping from confidence to expected error rate:
+3. Define **Adaptive Error Rate** 
 4. Estimate \(h\) non-parametrically by **binning** confidences and measuring error rates, then stabilize sparse bins via **Bayesian shrinkage** toward a global error prior.
 5. Use the per-sample risk estimate for:
    - reliability checks (is risk itself calibrated?)
    - risk–coverage analysis
    - conservative, risk-controlled thresholds for abstention
    - (optionally) risk-aware ensembles
+|
 
-#### 3.1.2 How df-analyze implements those same ideas
-
-Here are the rough 1:1 correspondences in the codebase:
-
-| Thesis concept | df-analyze implementation |
-|---|---|
-| Confidence from probabilities | `analysis/adaptive_error/confidence_metrics.py` implements probability-derived confidence metrics (plus some model-specific options). |
-| Mapping \(h(c)\) via binned error rates | `analysis/adaptive_error/aer.py` (`AdaptiveErrorCalculator`) builds the confidence→expected-error lookup via bins. |
-| Bayesian shrinkage with global error prior | `AdaptiveErrorCalculator` supports a **prior strength** that pulls sparse bins toward the global error rate. |
-| Calibration separated from training | df-analyze uses **OOF predictions** on the training split as a leakage-safe calibration proxy. |
-| Risk–coverage / selective prediction | `analysis/adaptive_error/risk_control.py` plus plotting in `analysis/adaptive_error/plots.py`. |
-| Risk-controlled thresholds | `risk_control.find_threshold(...)` picks a threshold using an upper confidence bound criterion. |
-| Ensemble extensions | `analysis/adaptive_error/ensemble_*` implements thesis-aligned strategy families. |
-
-### 3.2 How aER is integrated into the df-analyze pipeline
-
-aER is implemented as a **post-evaluation stage**. It doesn’t fork df-analyze into a separate training pipeline; it consumes the stuff df-analyze already computed.
-
-Roughly:
+### How aER is integrated into the df-analyze pipeline
 
 ```
-(df-analyze core)
-Data → Prepare → (feature selection) → Tune → Evaluate on holdout
-
-(aER extension)
 Use tuned models + train split:
-  → build OOF predictions
+  → build OOF predictions （ every row’s prediction came from a model that never saw that row in training）
   → pick calibrator + confidence metric
   → fit confidence → expected error mapping
   → score + plot on holdout test
   → write risk/coverage outputs (+ optional ensembles)
 ```
 
-Below is the same idea broken down into the steps you’ll see in the implementation.
-
-#### Step 0 — Entry point and gating
-
 - aER runs only if `--adaptive-error` is set.
 - aER runs only for **classification**.
-
-Hook point: after `evaluate_tuned(...)` finishes, df-analyze calls the aER runner (see `df_analyze/_main.py`).
-
-#### Step 1 — Choose which tuned models to analyze
 
 aER is computed for the **top-K tuned models** (by CV score), controlled by:
 
@@ -227,27 +185,9 @@ Implementation note:
 
 - **Dummy** is skipped for aER by default. It’s a useful baseline for accuracy, but its “uncertainty” behaviour isn’t very informative for risk estimation.
 
-#### Step 2 — Build OOF prediction tables (calibration proxy)
-
-For each selected tuned model:
-
-1. reuse the training split \((X_{train}, y_{train})\)
-2. run a K-fold OOF loop (`--aer-oof-folds`) using df-analyze’s splitter logic (same grouping constraints, etc.)
-3. write an **OOF per-sample table** containing:
-   - true label
-   - out-of-fold predicted label
-   - raw probabilities/scores (when available)
-   - candidate confidence metrics derived from those probabilities/scores
-
-This is the “no cheating” calibration set: every row’s prediction came from a model that never saw that row in training.
-
-#### Step 3 — Probability calibration (optional, but usually a good idea)
-
 Confidence metrics are only as good as the underlying probability estimates, so df-analyze can fit an **external probability calibrator** using the OOF predictions, then apply it consistently to both OOF and test computations.
 
-Depending on what’s feasible for the model/setting, calibrators include “none”, temperature scaling, Platt scaling, and isotonic variants. The chosen calibrator is recorded in the per-model metadata.
-
-#### Step 4 — Pick a confidence metric (automatic unless you pin it)
+Depending on what’s feasible for the model, calibrators include “none”, temperature scaling, Platt scaling, and isotonic variants. The chosen calibrator is recorded in the per-model metadata.
 
 Unless you pass `--aer-confidence-metric`, df-analyze tries several candidate confidence metrics and picks one based on OOF behaviour:
 
@@ -255,12 +195,7 @@ Unless you pass `--aer-confidence-metric`, df-analyze tries several candidate co
 2. score how well it predicts correctness (a Brier-style criterion)
 3. keep the metric that looks most reliable on OOF data
 
-The selection is written to disk so you can review what happened.
-
-#### Step 5 — Fit the confidence → expected error mapping
-
-This is where \(h(c)\) is fit, using `AdaptiveErrorCalculator`:
-
+than for the adaptive error rate:
 1. bin OOF confidence values into `--aer-bins` bins
 2. compute empirical error rate per bin
 3. apply Bayesian shrinkage toward the global OOF error rate (`--aer-prior-strength`)
@@ -269,41 +204,34 @@ This is where \(h(c)\) is fit, using `AdaptiveErrorCalculator`:
    - enforce monotonicity (`--aer-monotonic`)
    - quantile (“adaptive”) binning (`--aer-adaptive-binning`) for skewed confidence distributions
 
-The output is effectively a lookup function: confidence in → expected error out.
-
-#### Step 6 — Evaluate the mapping on the holdout test set
-
-On \((X_{test}, y_{test})\) using the tuned model trained on the full train split:
+#### Evaluate the mapping on the holdout test set
 
 1. predict labels + probabilities on test
-2. apply the same calibrator chosen in Step 3
+2. apply the same calibrator chosen before 
 3. compute the chosen confidence metric
-4. compute per-sample **aER** via the fitted lookup \(h\)
+4. compute per-sample **aER** 
 5. write per-sample tables, binned reliability tables, and quick plots
 
-#### Step 7 — Risk–coverage + a risk-controlled threshold (best model)
+#### Risk–coverage + a risk-controlled threshold (best model)
 
 For the best aER-analysed model (top-ranked by df-analyze tuning), df-analyze computes:
 
 - the **risk–coverage curve** (coverage vs accuracy under selective prediction)
-- a **risk-controlled threshold** \(t^*\) (“accept only when aER ≤ \(t^*\)”), chosen conservatively using:
+- a **risk-controlled threshold** chosen conservatively using:
   - target error: `--aer-target-error`
   - significance: `--aer-alpha`
   - minimum accepted predictions: `--aer-nmin`
 
 The threshold selection uses OOF estimates to avoid leaking information from the holdout test set.
 
-#### Step 8 — Cross-model comparisons
+#### Cross-model comparisons
 
 aER also writes cross-model summary tables and comparison plots. These are handy when two models have similar accuracy/AUROC but very different reliability.
 
-#### Optional Step 9 — Ensembles
+#### Ensembles
 
 If `--aer-ensemble` is enabled, df-analyze runs risk-aware ensemble strategies. These reuse the same OOF artifacts and produce the same kinds of outputs (per-sample risk, risk–coverage curves, thresholds), under `adaptive_error/ensemble/`.
 
-### 3.3 Practical adaptations made for df-analyze
-
-The thesis can assume a clean train/calibration/test split. df-analyze can’t always (it’s an AutoML pipeline that starts from “here’s one dataset”), so the integration makes a few pragmatic choices:
 
 1. **Calibration via OOF predictions**  
    Instead of forcing an extra calibration split, df-analyze uses OOF predictions on the training split. This keeps the “not trained on the same sample” requirement without changing df-analyze’s basic train/test structure.
@@ -312,7 +240,7 @@ The thesis can assume a clean train/calibration/test split. df-analyze can’t a
    For risk-controlled thresholds, df-analyze can compute cross-fitted aER values on OOF data (each sample’s risk estimated by a mapping that didn’t use that sample’s fold). This is mainly about keeping things conservative.
 
 3. **Stability on messy confidence distributions**  
-   Real-world confidence distributions can be very skewed (lots of values near 1.0, sparse bins elsewhere). To keep \(h\) from doing something silly, df-analyze supports:
+   Real-world confidence distributions can be very skewed (lots of values near 1.0, sparse bins elsewhere). 
    - minimum bin counts (`--aer-min-bin-count`) and bin merging
    - Bayesian shrinkage to avoid “single sample = 0% error forever” bins
    - optional smoothing/monotonic constraints
@@ -320,9 +248,9 @@ The thesis can assume a clean train/calibration/test split. df-analyze can’t a
 4. **Per-target execution in multi-target mode**  
    aER stays single-target internally. Multi-target runs just slice per-target predictions and call the same engine once per target, rather than introducing an entirely new “multi-target aER” framework.
 
-### 3.4 aER configuration options
+### aER configuration options
 
-The aER stage is controlled via CLI flags. The ones you’ll typically care about:
+The aER stage is controlled via CLI flags. 
 
 | Option | Meaning | Typical use |
 |---|---|---|
@@ -340,22 +268,18 @@ The aER stage is controlled via CLI flags. The ones you’ll typically care abou
 | `--aer-nmin N` | Minimum accepted predictions when picking a threshold | Avoid trivial thresholds |
 | `--aer-top-k K` | Run aER only on top-K tuned models | Reduce runtime |
 | `--aer-ensemble` | Enable ensemble strategies | Evaluate risk-aware ensembles |
-| `--aer-ensemble-strategies ...` | Pick which ensemble strategies to run | Controlled experiments |
+| `--aer-ensemble-strategies` | Pick which ensemble strategies to run | Controlled experiments |
 
-### 3.5 aER outputs: files and figures
+### aER outputs: files and figures
 
 All aER artifacts are written under:
 
 - **single-target:** `adaptive_error/`
 - **multi-target:** `adaptive_error/<target_name>/`
 
-The layout follows the same pattern as df-analyze’s other pipeline stages: predictable folders, machine-readable tables, and a few Markdown summaries.
-
-A design detail worth calling out: when a stage fails for a specific model, df-analyze writes placeholder “NOT_AVAILABLE” artifacts rather than silently skipping outputs. That way downstream tooling doesn’t break mysteriously.
-
 ---
 
-#### 3.5.1 Directory layout
+#### Directory layout
 
 ```
 adaptive_error/
@@ -391,9 +315,6 @@ adaptive_error/
 
 ---
 
-#### 3.5.2 Root-level aER artifacts
-
-These summarize *all* analysed models for one target.
 
 ##### `adaptive_error/run_config.json`
 
@@ -433,7 +354,7 @@ You’ll typically see columns like `rank`, `model_slug`, `metric`, `cv_score`, 
 
 ---
 
-#### 3.5.3 Per-model aER artifacts: `adaptive_error/models/<model_slug>/...`
+#### Per-model aER : `adaptive_error/models/<model_slug>/...`
 
 Each analysed model gets its own folder with:
 
@@ -447,7 +368,7 @@ Below is what you’ll find in each subfolder.
 
 ---
 
-### A) `.../metadata/`
+### A `.../metadata/`
 
 ##### `confidence_metric_selection.json`
 
@@ -480,7 +401,7 @@ Below is what you’ll find in each subfolder.
 
 ---
 
-### B) `.../tables/`
+### B `.../tables/`
 
 ##### `confidence_to_expected_error_lookup.csv`
 
@@ -524,7 +445,7 @@ A clinician-facing per-sample table for manual audit. Usually includes:
 
 ---
 
-### C) `.../plots/`
+### C `.../plots/`
 
 ##### `confidence_vs_expected_error.png`
 
@@ -539,7 +460,7 @@ A clinician-facing per-sample table for manual audit. Usually includes:
 
 ---
 
-### D) `.../predictions/`
+### D `.../predictions/`
 
 ##### `oof_per_sample.parquet` (+ `.csv`)
 
@@ -566,7 +487,7 @@ A clinician-facing per-sample table for manual audit. Usually includes:
 
 ---
 
-### E) `.../reports/`
+### E `.../reports/`
 
 Markdown summaries for humans (mirrors the key CSV tables):
 
@@ -576,11 +497,9 @@ Markdown summaries for humans (mirrors the key CSV tables):
 
 ---
 
-#### 3.5.4 Ensemble outputs (optional): `adaptive_error/ensemble/`
+#### Ensemble outputs (optional): `adaptive_error/ensemble/`
 
 Ensemble analysis is enabled with `--aer-ensemble`.
-
-At a high level you’ll see:
 
 ##### `adaptive_error/ensemble/tables/ensemble_summary.csv`
 
@@ -600,17 +519,13 @@ A per-strategy directory that mirrors the per-model structure:
 - `predictions/test_per_sample.*`: per-sample test predictions and aER for the ensemble
 - the same reliability tables and plots as base models
 
-The point is to let you evaluate thesis-motivated ideas directly: do risk-aware ensembles improve selective prediction, and do their risk estimates stay calibrated?
-
 ---
 
-## 4. Multi-target learning
+## Multi-target learning
 
-### 4.1 How multi-target is integrated into df-analyze
+### How multi-target is integrated into df-analyze
 
-Multi-target support was added by extending df-analyze’s existing abstractions, not by bolting on a second pipeline.
-
-At a high level:
+Multi-target support was added by extending df-analyze’s existing abstractions
 
 1. CLI accepts multiple targets (`--targets`)
 2. Prepared data stores `y` as a DataFrame when multiple targets are provided
@@ -618,99 +533,22 @@ At a high level:
 4. Feature selection runs per target, then is aggregated into a shared feature set
 5. Models can train/evaluate with multi-output `y`, and reporting stays per-target
 
-Design principle:
-
-> Multi-target should feel like “the same pipeline, repeated where the pipeline is inherently target-dependent”, not a separate mode with different code paths everywhere.
-
-#### Step-by-step integration
-
-##### Step 0 — CLI: `--targets` extends `--target`
+##### CLI: `--targets`
 
 - `--target` still exists (single-target, backwards compatible).
-- `--targets y1,y2,...` activates multi-target mode and overrides `--target`.
+- `--targets y1,y2,...` activates multi-target mode 
 
-There isn’t a separate entry point; it’s still the same `main()` flow with a target list.
 
----
-
-##### Step 1 — Preparation stage: multi-target `y`
-
-In multi-target mode:
-
-- `PreparedData.y` is a **DataFrame** with one column per target.
-- For classification, `labels.json` becomes nested:
-  - `{target_name: {encoded_int: original_label_string}}`
-
-This keeps the rest of the pipeline sane: label decoding remains correct per target, and you can still slice to a single-target view when needed.
-
----
-
-##### Step 2 — Train/test splitting: stratification with multiple targets
-
-Classification wants stratified splits, but multi-target introduces a nasty edge case: the joint combinations of target levels can explode, producing lots of rare combinations.
-
-df-analyze handles this by building a **combined stratification label** from multiple targets, and (if needed) dropping the most unique target(s) until the split is feasible.
-
-It’s not perfect, but it preserves the intent of stratification without inventing a whole new sampling system.
-
----
-
-##### Step 3 — Univariate analysis and feature selection: reuse by slicing
-
-Most univariate analyses and selection methods are inherently single-target. Rather than rewrite them, df-analyze does:
-
-1. iterate over targets
-2. call `PreparedData.for_target(target)` to get a single-target view
-3. run the existing routines unchanged
-4. write outputs under per-target subdirectories
-
-This is the main “reuse instead of rewrite” trick.
-
----
-
-##### Step 4 — Aggregate selected features across targets
-
-After per-target selection, df-analyze aggregates features into one shared feature set (see §4.2). That shared set is what gets passed into tuning/evaluation so the data flow stays consistent.
-
----
-
-##### Step 5 — Tuning and evaluation with multi-output `y`
-
-The model interface is extended so models can accept:
-
-- `y_train` as a Series (single-target) **or**
-- `y_train` as a DataFrame (multi-target)
-
-For tuning:
-
-- a single Optuna trial proposes one parameter set
-- the objective is the **mean score across targets**
-
-Runtime control (important in multi-target runs):
-
-- df-analyze reuses your global `--htune-trials` budget but scales it down so multi-target runs don’t blow up:
-  - effective trials ≈ `max(15, htune_trials // n_targets)`  
-  - CatBoost gets an extra cap for stability
-
-For reporting:
-
-- the long performance table gains a `target` column
-- Markdown summaries expand naturally (you’ll see one row per target)
-
-No “parallel tuner” is introduced; it’s the same tuning stage.
-
----
-
-### 4.2 Multi-target feature selection aggregation
+### Multi-target feature selection aggregation
 
 Multi-target selection is basically two steps:
 
-1. Run selection per target (unchanged methods).
-2. Combine (“aggregate”) those per-target outputs into a shared feature list.
+1. Run selection per target 
+2. Combine those per-target outputs into a shared feature list.
 
 Two aggregation strategies are supported:
 
-#### A) `--mt-agg-strategy borda` (default)
+#### A `--mt-agg-strategy borda` (default)
 
 A rank aggregation approach:
 
@@ -720,7 +558,7 @@ A rank aggregation approach:
 
 This is a decent default when targets are noisy but you want one stable shared subset.
 
-#### B) `--mt-agg-strategy freq`
+#### B `--mt-agg-strategy freq`
 
 A simpler frequency-based approach:
 
@@ -738,7 +576,7 @@ These help keep models tractable and results interpretable.
 
 ---
 
-### 4.3 Multi-target models
+### Multi-target models
 
 Multi-target training is currently supported for:
 
@@ -746,77 +584,16 @@ Multi-target training is currently supported for:
 - **Dummy** (implemented as one estimator per target)
 - **CatBoost** (implemented as one estimator per target)
 
-#### 4.3.1 Shared design: extend the model interface, not the pipeline
 
-The key change is in `df_analyze/models/base.py`:
 
-- `DfAnalyzeModel.fit(...)` accepts `y` as a Series **or** DataFrame.
-- `predict(...)` returns:
-  - a Series (single-target), or
-  - a DataFrame (multi-target, one column per target).
-- `predict_proba(...)` returns:
-  - a single probability array (single-target), or
-  - a dict `{target_name: proba_array}` (multi-target) where appropriate.
-
-So the tuning/eval pipeline can call the same methods; the model wrappers normalize I/O shapes.
-
----
-
-#### 4.3.2 KNN (multi-target)
-
-**Where:** `df_analyze/models/knn.py`
-
-- scikit-learn KNN estimators accept multi-output `y` directly.
-- df-analyze passes the multi-target DataFrame into `.fit(...)`.
-- `predict(...)` returns an \(n \times T\) array, which df-analyze wraps into a DataFrame.
-- For multi-output classification, scikit-learn returns a **list of probability arrays** (one per target) from `predict_proba(...)`; df-analyze turns that into a dict keyed by target name.
-
----
-
-#### 4.3.3 Dummy (multi-target)
-
-**Where:** `df_analyze/models/dummy.py`
-
-Dummy is a baseline, and multi-output support across dummy variants isn’t consistent enough to rely on. df-analyze therefore implements Dummy as “one model per target”:
-
-- `self.models[target] = DummyClassifier(...)` / `DummyRegressor(...)`
-- `.fit(...)` loops over targets and fits each model
-- `.predict(...)` loops and concatenates into a DataFrame
-- `.predict_proba(...)` returns `{target: proba}`
-
-Treating targets independently here keeps the baseline meaning clean (and avoids accidental coupling).
-
----
-
-#### 4.3.4 CatBoost (multi-target)
-
-**Where:** `df_analyze/models/catboost.py`
-
-CatBoost doesn’t expose a single “multi-output classifier” interface that fits neatly into df-analyze’s tuning/evaluation flow, so it follows the same pattern as Dummy:
-
-- train one CatBoost model per target:
-  - `self.models[target] = CatBoostClassifier(...)` / `CatBoostRegressor(...)`
-
-Categorical features:
-
-- df-analyze uses CatBoost’s native categorical handling
-- categorical indices come from the prepared data’s `X_cat` / `X` representation
-
-Compute notes:
-
-- CatBoost will use GPU if available; df-analyze falls back to CPU safely if GPU isn’t available or fails.
-- Multi-target tuning can get expensive quickly, so the multi-target model set is kept small and trials are scaled down (see §4.1 Step 5).
-
----
-
-## 5. Output changes in multi-target mode
+## Output changes in multi-target mode
 
 Multi-target keeps df-analyze’s overall directory layout, but two things change consistently:
 
 1. **Target-dependent stages write to per-target subdirectories.**
 2. **Final evaluation tables become target-aware.**
 
-### 5.1 Per-target subdirectories
+### Per-target subdirectories
 
 With `--targets`, target-dependent artifacts are written under paths like:
 
@@ -826,7 +603,7 @@ With `--targets`, target-dependent artifacts are written under paths like:
 
 These contain the same kinds of files as the single-target pipeline, just repeated once per target.
 
-### 5.2 Aggregated (shared) selection artifacts
+### Aggregated selection 
 
 After aggregating per-target selections, df-analyze writes the aggregated results in the usual places:
 
@@ -835,7 +612,7 @@ After aggregating per-target selections, df-analyze writes the aggregated result
 
 Aggregated JSON payloads include `target_names` metadata so you can see which targets were involved.
 
-### 5.3 Prepared data artifacts that change meaning
+### Prepared data 
 
 In `prepared/` (and in train/test prepared folders):
 
@@ -844,68 +621,14 @@ In `prepared/` (and in train/test prepared folders):
 
 Everything else is structurally the same.
 
-### 5.4 Results tables become target-aware
+### Results tables
 
 In `results/`:
 
 - `performance_long_table.csv` gains a `target` column.
 - Markdown summaries expand accordingly (each model/selection pair appears once per target).
 
-This matters for review: tuning optimizes an averaged objective, but reporting stays transparent per target.
 
----
 
-## 6. Developer map: where the integrations live
 
-If you’re maintaining/extending these pieces, the key modules are:
 
-### Adaptive Error Rate (aER)
-
-- `df_analyze/analysis/adaptive_error/runner.py`  
-  Orchestrates aER execution from prepared data and tuned results.
-- `df_analyze/analysis/adaptive_error/oof.py` + `oof_stage.py`  
-  Builds OOF predictions, selects probability calibrator and confidence metric.
-- `df_analyze/analysis/adaptive_error/aer.py`  
-  `AdaptiveErrorCalculator`: fits the confidence→expected error mapping.
-- `df_analyze/analysis/adaptive_error/test_stage.py`  
-  Applies mapping on test data, writes per-sample outputs and diagnostics.
-- `df_analyze/analysis/adaptive_error/risk_control.py` + `risk_control_writer.py`  
-  Risk-controlled threshold selection and reporting.
-- `df_analyze/analysis/adaptive_error/ensemble_*`  
-  Optional thesis-aligned ensemble extensions.
-
-### Multi-target learning
-
-- `df_analyze/cli/cli.py`  
-  Adds `--targets` and multi-target aggregation options; maps them into `ProgramOptions`.
-- `df_analyze/preprocessing/prepare.py`  
-  Stores multi-target `y` as a DataFrame; adds `PreparedData.for_target(...)`.
-- `df_analyze/splitting.py`  
-  Implements multi-target-aware stratification labels (`y_split_label`).
-- `df_analyze/selection/multitarget.py`  
-  Aggregates per-target feature selection results.
-- `df_analyze/models/base.py`  
-  Extends the model interface to accept/return multi-target structures.
-- `df_analyze/models/knn.py`, `models/dummy.py`, `models/catboost.py`  
-  Multi-target model implementations.
-
-### Integration wiring
-
-- `df_analyze/_main.py`  
-  Runs per-target univariate/selection via `PreparedData.for_target(...)`, aggregates selections, runs multi-target tuning, and (if enabled) runs aER per target by slicing evaluation results.
-
----
-
-## Appendix: How to read the aER outputs scientifically
-
-If you only have time for a quick pass:
-
-1. Start with `adaptive_error/tables/aer_metrics_by_model.csv` and pick a couple of promising models (good accuracy *and* decent aER calibration).
-2. For the best model:
-   - open `models/<slug>/plots/confidence_vs_expected_error.png` (basic sanity)
-   - check `models/<slug>/tables/test_error_reliability_bins.csv` (is aER itself calibrated?)
-   - look at `models/<slug>/plots/coverage_vs_accuracy.png` (selective prediction behaviour)
-   - read `models/<slug>/reports/risk_control_threshold.md` (what threshold was chosen and what it implies)
-3. For case-level audits, `clinician_view.csv` and `top20_highest_adaptive_error.csv` are the fastest “show me the risky stuff” entry points.
-
-That workflow matches the intent of the thesis docs: turn raw model confidence into a reviewable, per-sample risk signal you can actually act on.
