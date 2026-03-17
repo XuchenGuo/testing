@@ -1,167 +1,117 @@
-<!-- omit from toc -->
-# Contents
+# df-analyze User Guide — Multi-Target Support and Adaptive Error Rate
 
-- [Overview](#overview)
-  - [Multi-Target Support](#multi-target-support)
-  - [Adaptive Error Rate](#adaptive-error-rate)
-- [Installation](#installation)
-  - [Python Version](#python-version)
-  - [GPU Setup and Verification](#gpu-setup-and-verification)
-- [Usage](#usage)
-  - [Using Multi-Target Support](#using-multi-target-support)
-    - [Multi-Target Command Line Options](#multi-target-command-line-options)
-    - [Multi-Target Quick Start and Examples](#multi-target-quick-start-and-examples)
-    - [Data Preparation Rules](#data-preparation-rules)
-  - [Using Adaptive Error Rate](#using-adaptive-error-rate)
-    - [When AER Runs](#when-aer-runs)
-    - [AER Command Line Options](#aer-command-line-options)
-    - [Confidence Metrics](#confidence-metrics)
-    - [AER Quick Start and Examples](#aer-quick-start-and-examples)
-- [Analysis Pipeline](#analysis-pipeline)
-  - [Multi-Target Analysis](#multi-target-analysis)
-  - [Adaptive Error Rate Pipeline](#adaptive-error-rate-pipeline)
-- [Program Outputs](#program-outputs)
-  - [Multi-Target Outputs](#multi-target-outputs)
-  - [Adaptive Error Rate Outputs](#adaptive-error-rate-outputs)
-    - [Cross-Model Files](#cross-model-files)
-    - [Model-Specific Files](#model-specific-files)
-    - [Key Columns and Metrics](#key-columns-and-metrics)
-- [Limitations](#limitations)
-  - [Multi-Target Constraints](#multi-target-constraints)
-  - [Adaptive Error Rate Constraints](#adaptive-error-rate-constraints)
-- [Currently Implemented Program Features and Analyses](#currently-implemented-program-features-and-analyses)
-  - [Completed Features](#completed-features)
-    - [Multi-Target Prediction](#multi-target-prediction)
-    - [Adaptive Error Estimation](#adaptive-error-estimation)
+Package version: 4.1.0 
+Python requirement >= 3.13.11
 
-# Overview
+Main features covered: `--targets` and `--adaptive-error`
 
-This update documents the additions introduced in `df-analyze` 4.1.0:
-multi-target support through `--targets`, and Adaptive Error Rate (AER)
-analysis for classification through `--adaptive-error`.
+This guide covers the theory, command-line usage, output interpretation, and
+installation details for two newly integrated features: multi-target support
+and adaptive error rate.
 
-The guide below follows the section organization and tone of the main
-repository README, but focuses only on material that is new.
+# GPU Setup and Verification
 
-## Multi-Target Support
+The current CLI does not expose a single global `--gpu` switch. Instead, GPU
+usage is decided inside model code. The `CatBoost` model sets
+`task_type='GPU'` automatically when a supported GPU is detected, and the
+`Gandalf` model checks `torch.cuda.is_available()` to decide whether to use a
+GPU accelerator. PyTorch, NVIDIA, and CatBoost all provide official
+documentation for the relevant compatibility and verification steps:
 
-Multi-target support allows one input row to predict more than one output
-column in the same run. For continuous targets, this is multi-output
-regression. For categorical targets, this is multi-output classification.
+- [NVIDIA CUDA Compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/)
+- [PyTorch `torch.cuda.is_available`](https://docs.pytorch.org/docs/stable/generated/torch.cuda.is_available.html)
+- [PyTorch Get Started Locally](https://pytorch.org/get-started/locally/)
 
-This is most useful when the targets are related, for example several
-clinical outcomes or several laboratory values. The model learns a mapping
-from a feature matrix `X` to a target vector `(y1, y2, ...)` rather than to a
-single target column.
+| Step | Command | Expected output |
+|------|---------|-----------------|
+| Check that the NVIDIA driver is visible | `nvidia-smi` | GPU name, driver version, memory information, and runtime status |
+| Check PyTorch CUDA visibility | `python -c "import torch; print(torch.cuda.is_available()); print(torch.version.cuda)"` | `True` if PyTorch can use CUDA; the second value is the CUDA runtime version used by that torch build |
+| Check CatBoost GPU visibility | `python -c "from catboost.utils import get_gpu_device_count; print(get_gpu_device_count())"` | A positive number means CatBoost sees one or more GPUs |
+| Install a matching PyTorch build | Use the [official PyTorch installation selector](https://pytorch.org/get-started/locally/) | Generates the install command matching your OS, package manager, and CUDA runtime |
+| Confirm driver and CUDA compatibility | Read [NVIDIA CUDA compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/) | If the driver is too old for the CUDA family used by your PyTorch build, CUDA may not initialize correctly |
 
-If `--adaptive-error` is also enabled for a classification run,
-`df-analyze` completes the final multi-target evaluation first, then slices
-the results back into one target at a time and runs AER separately for each
-target.
-
-## Adaptive Error Rate
-
-Adaptive Error Rate is a sample-level reliability estimate for classification
-predictions. Instead of reporting only one global error rate for the full test
-set, AER estimates the expected probability that an individual prediction is
-incorrect.
-
-Lower AER values indicate more reliable predictions. Higher values indicate
-less trustworthy predictions. In practice, this places AER close to
-probability calibration, selective prediction, and risk-coverage analysis:
-the goal is not only to predict well on average, but also to estimate how
-much trust to place in each prediction.
-
-# Installation
-
-The recommended installation path remains the `uv` workflow described in the
-main README. The additions documented here assume Python 3.13.11 or newer.
-Examples below assume you are running commands from the repository root.
-
-## Python Version
-
-```shell
-uv python install 3.13.11
-uv sync
-uv run python df-analyze.py --help
-```
-
-## GPU Setup and Verification
-
-The current CLI does not expose one global `--gpu` switch. GPU use is decided
-inside model code. At present, CatBoost enables `task_type='GPU'` when a
-supported device is detected, and Gandalf checks
-`torch.cuda.is_available()` before using a GPU accelerator.
-
-For compatibility and installation details, see the
-[NVIDIA CUDA compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/),
-[PyTorch CUDA availability reference](https://docs.pytorch.org/docs/stable/generated/torch.cuda.is_available.html),
-and the [PyTorch installation selector](https://pytorch.org/get-started/locally/).
-
-A minimal verification sequence is:
-
-1. Confirm that the NVIDIA driver is visible with `nvidia-smi`.
-2. Confirm that PyTorch can see CUDA.
-3. Confirm that CatBoost can see one or more GPUs.
-4. Make sure the installed PyTorch build matches the CUDA runtime supported
-   by the driver.
+All three checks in sequence:
 
 ```shell
 nvidia-smi
 
-python -c "import torch; print('torch', torch.__version__); print('cuda runtime', torch.version.cuda); print('cuda available', torch.cuda.is_available())"
+python -c "import torch; print('torch', torch.__version__); \
+    print('cuda runtime', torch.version.cuda); \
+    print('cuda available', torch.cuda.is_available())"
 
-python -c "from catboost.utils import get_gpu_device_count; print('catboost GPU count', get_gpu_device_count())"
+python -c "from catboost.utils import get_gpu_device_count; \
+    print('catboost GPU count', get_gpu_device_count())"
 ```
 
-# Usage
 
-As in the main README, the examples below omit `uv run` for brevity.
 
-## Using Multi-Target Support
+# Multi-Target Support
 
-Use `--targets` when one run should predict more than one target column.
-Pass the target names as a single comma-separated argument. If a target name
-contains spaces, quote the full argument, for example:
+Multi-target support means that one input row is used to predict more than one
+output column simultaneously. If the targets are continuous the task is
+multi-output regression; if they are categorical the task is multi-output or
+multiclass-multioutput classification.
+
+The model learns a function from a feature matrix **X** to a target vector
+**y** = (y₁, y₂, ...). This is valuable when the targets are related — for
+example, several clinical outcomes or several laboratory measurements recorded
+from the same subject.
+
+If `--adaptive-error` is also enabled and the task is classification,
+`df-analyze` slices the final multi-target results back into one target at a
+time and runs adaptive error analysis separately for each target.
+
+
+## CLI Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--target` | `["target"]` | Single-target mode. Use this when you have only one target column. |
+| `--targets` | `[]` | Comma-separated target columns for a multi-target run. This is the key flag for this feature. |
+| `--mode` | `"classify"` | Set to `classify` or `regress`. All targets in one run must use the same mode. |
+| `--classifiers` | `knn dummy catboost` | Space-separated classifier list for classification runs. |
+| `--regressors` | `knn dummy catboost` | Space-separated regressor list for regression runs. |
+| `--mt-agg-strategy` | `"borda"` | How per-target feature selections are combined. Choices: `borda` or `freq`. |
+| `--mt-top-k` | `None` | Optional final feature cap after aggregation. Omitting it triggers automatic top-k selection rather than retaining everything. |
+| `--outdir` | user-defined | Where the run directory will be written. |
+| `--no-preds` | flag | Skips large prediction-oriented output files to save disk space. |
+
+Use `--targets` with a single comma-separated string, for example:
+
+```shell
+--targets outcome_1,outcome_2,outcome_3
+```
+
+If target names contain spaces, quote the entire comma-separated argument:
 
 ```shell
 --targets "Outcome A,Outcome B,Outcome C"
 ```
 
-Model lists remain space-separated, not comma-separated. For example:
+Use `--classifiers` and `--regressors` as space-separated lists (not
+comma-separated):
 
 ```shell
 --classifiers dummy knn catboost
---regressors dummy knn catboost
 ```
 
-### Multi-Target Command Line Options
 
-- `--target`
-  - Single-target mode. Use this when there is only one target column.
-- `--targets`
-  - Comma-separated target columns for a multi-target run.
-- `--mode`
-  - Set to `classify` or `regress`. All targets in one run must match the
-    same mode.
-- `--classifiers`
-  - Space-separated classifier list for multi-target classification runs.
-- `--regressors`
-  - Space-separated regressor list for multi-target regression runs.
-- `--mt-agg-strategy`
-  - Combine per-target feature selections by `borda` or `freq`.
-- `--mt-top-k`
-  - Optional final feature cap after aggregation. In the current
-    implementation, omitting this option triggers automatic top-k selection
-    rather than keeping all aggregated features.
-- `--outdir`
-  - Directory where the run outputs will be written.
-- `--no-preds`
-  - Skip large prediction-oriented output files to reduce disk use.
+## Usage Instructions
 
-### Multi-Target Quick Start and Examples
+1. Choose your task type with `--mode classify` or `--mode regress`.
+2. Replace the old single-target flag `--target` with `--targets` and supply
+   the target column names as one comma-separated argument.
+3. Choose the model family: `--classifiers` for classification or
+   `--regressors` for regression.
+4. Optionally choose how `df-analyze` aggregates selected features across
+   targets with `--mt-agg-strategy borda` or `--mt-agg-strategy freq`.
+5. Set an output directory with `--outdir`.
+6. Run the command from the repository root.
 
-Simple multi-target classification run:
+
+## Command Examples
+
+Simple run (multi-target classification):
 
 ```shell
 python df-analyze.py \
@@ -171,7 +121,7 @@ python df-analyze.py \
     --outdir ./out_mt_cls
 ```
 
-More explicit multi-target regression run:
+More explicit run (multi-target regression):
 
 ```shell
 python df-analyze.py \
@@ -183,7 +133,7 @@ python df-analyze.py \
     --outdir ./out_mt_reg
 ```
 
-Multi-target classification with a fixed feature cap:
+Full-control run (multi-target classification with a fixed feature cap):
 
 ```shell
 python df-analyze.py \
@@ -199,104 +149,135 @@ python df-analyze.py \
     --outdir ./out_mt_full
 ```
 
-### Data Preparation Rules
 
-For multi-target runs, target preprocessing is stricter than in the
-single-target case because every row contributes to several outcomes at once.
+## Data Cleaning Rules
 
-- Multi-target classification:
-  - rows with a missing value in any target are removed
-  - a rare class is currently defined as a class with 20 or fewer samples
-  - a row is removed when more than one third of its target values belong to
-    rare classes
-  - after filtering, `df-analyze` still warns if any target column retains a
-    class with 20 or fewer samples, since downstream cross-validation may
-    become unstable or fail
-- Multi-target regression:
-  - rows with a missing value in any target are removed
+- Multi-target classification and regression: rows with a missing value in any
+  target are always removed.
+- A rare class is defined as a class with 20 or fewer samples.
+- Multi-target classification: a row is removed when more than one third of its
+  target values belong to rare classes.
+- After filtering, the preparation code still warns if any target column retains
+  classes with 20 or fewer samples, because downstream cross-validation may
+  become unstable or fail.
 
-## Using Adaptive Error Rate
 
-Use `--adaptive-error` to estimate a per-sample error probability for
-classification predictions. The output is a risk score attached to each
-prediction, not a replacement for the ordinary model metrics already reported
-elsewhere in `df-analyze`.
+## Multi-Target Outputs
 
-### When AER Runs
+| Path | Description |
+|------|-------------|
+| `prepared/y.parquet` | Prepared target data after preprocessing. For classification, these are encoded integers; for regression, these are scaled target values. |
+| `prepared/labels.parquet` | For multi-target classification, stores one label map per target so encoded integers can be translated back to original class labels. |
+| `features/associations/<target>/` | Per-target univariate association outputs. |
+| `features/predictions/<target>/` | Per-target univariate prediction outputs when prediction outputs are enabled. |
+| `results/results_report.md` | Overall report for the final multi-output evaluation. |
+| `results/results_report_target_<target>.md` | One readable report per target. |
+| `results/final_performances.csv` | Overall summary table. In multi-target runs this is the main aggregated performance table across targets; some models may also include joint metrics such as subset accuracy, Hamming loss, or multi-RMSE. |
+| `results/final_performances_per_target.csv` | Compact per-target performance summary. |
+| `results/performance_long_table_per_target.csv` | Long-form per-target metric table; usually the best file for detailed comparison. |
+| `results/main_metric_by_target_acc.csv` or `main_metric_by_target_mae.csv` | One key metric per target: accuracy for classification or MAE for regression. |
 
-AER currently runs only for classification tasks.
 
-- You must enable it with `--adaptive-error`.
+
+# Adaptive Error Rate
+
+Adaptive Error Rate (AER) is a sample-level reliability estimate for
+classification predictions. Rather than reporting a single global error rate
+for the entire dataset, AER estimates the expected probability that an
+individual prediction is incorrect. This concept is closely related to
+probability calibration, selective prediction, and risk-coverage control.
+
+For a prediction on sample *x*, the adaptive error rate *aER(x)* represents
+the estimated likelihood of error. A smaller *aER(x)* indicates a more
+reliable prediction, while a larger value suggests lower trustworthiness. The
+framework translates calibrated prediction confidence into sample-level error
+rate estimates, enabling adaptive reliability assessment, improved ensemble
+strategies, and more trustworthy decision-making in biomedical machine
+learning.
+
+
+## When AER Runs
+
+- AER runs only for classification tasks.
+- It must be explicitly enabled with `--adaptive-error`.
 - If the run is regression, AER is skipped.
-- If only a Dummy model remains after tuning, AER is skipped.
-- In multi-target classification, AER runs separately for each target after
-  the final multi-target evaluation completes.
+- If only a `Dummy` model is available after tuning, AER is skipped.
+- In multi-target classification, AER runs separately for each target after the
+  final multi-target evaluation is complete.
 
-### AER Command Line Options
 
-- **Core switch**
-  - `--adaptive-error`
-    - Enable AER analysis.
-- **Cross-fitting and binning**
-  - `--aer-oof-folds` (default `5`)
-    - Number of out-of-fold splits used for AER fitting and related
-      cross-fitting.
-  - `--aer-bins` (default `20`)
-    - Nominal number of confidence bins.
-  - `--aer-min-bin-count` (default `10`)
-    - Minimum number of samples per bin before bins are merged or reduced.
-  - `--aer-prior-strength` (default `2.0`)
-    - Strength of the beta-prior shrinkage toward the global error rate.
-  - `--aer-adaptive-binning`
-    - Use quantile-like adaptive bins instead of fixed-width bins.
-  - `--no-aer-smooth`
-    - Disable the default local smoothing of the confidence-to-error mapping.
-  - `--aer-monotonic`
-    - Enforce a monotonic confidence-to-error mapping.
-- **Confidence signal**
-  - `--aer-confidence-metric` (default `auto`)
-    - Confidence signal used to build the mapping. With `auto`,
-      `df-analyze` selects the best available signal by cross-fitted Brier
-      score.
-- **Risk-controlled summaries**
-  - `--aer-target-error` (default `0.05`)
-    - Target error rate used for summary tables and thresholding.
-  - `--aer-alpha` (default `0.05`)
-    - Significance level for the exact upper-bound calculation.
-  - `--aer-nmin` (default `1`)
-    - Minimum accepted sample count when choosing a risk-controlled
-      threshold.
-- **Model selection and outputs**
-  - `--aer-top-k` (default `0`)
-    - If greater than `0`, run AER only on the top-k tuned base models.
-      `0` means all usable base models.
-  - `--no-preds`
-    - Suppress large per-sample AER output files and write placeholders
-      instead.
+## What the AER Pipeline Does
 
-### Confidence Metrics
+1. Refits tuned model settings and builds out-of-fold (OOF) predictions on the
+   training portion.
+2. Builds or normalizes class probabilities. External calibration methods
+   available include: `none`, temperature scaling, Platt scaling, isotonic, or
+   one-vs-rest isotonic, chosen depending on the problem structure.
+3. Constructs candidate confidence signals, which can include probability
+   margin, tree vote agreement, tree leaf support, KNN vote, KNN
+   distance-weighted confidence, and KNN minimum distance confidence.
+4. Selects the best confidence signal automatically when
+   `--aer-confidence-metric auto` is used. The selection criterion is the
+   lowest cross-fitted Brier score for predicting whether the model is wrong.
+5. Fits a confidence-to-expected-error mapping by binning OOF confidences,
+   shrinking noisy bins toward the global error rate, smoothing the curve by
+   default, and optionally enforcing monotonicity.
+6. Applies the learned mapping to the holdout test set to produce one expected
+   error estimate per sample.
+7. Builds risk-controlled operating points using exact one-sided
+   Clopper-Pearson bounds with Bonferroni adjustment over scanned thresholds.
 
-The current implementation can score confidence using several model-dependent
-signals:
 
-- `proba_margin`
-  - Margin between the top two class probabilities.
-- `tree_vote_agreement`
-  - Agreement among tree votes.
-- `tree_leaf_support`
-  - Leaf support or training support within a tree model.
-- `knn_vote`
-  - Nearest-neighbor vote agreement.
-- `knn_dist_weighted`
-  - Distance-weighted nearest-neighbor confidence.
-- `knn_min_dist`
-  - Confidence derived from nearest-neighbor distance.
-- `auto`
-  - Select the best available signal by cross-fitted Brier score.
+## CLI Flags
 
-### AER Quick Start and Examples
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--adaptive-error` | `False` | Turns AER analysis on. |
+| `--aer-oof-folds` | `5` | Number of OOF splits used for AER fitting and cross-fitting. |
+| `--aer-bins` | `20` | Nominal number of confidence bins. |
+| `--aer-min-bin-count` | `10` | Minimum samples per bin before bins are merged or reduced. |
+| `--aer-prior-strength` | `2.0` | Strength of the beta-prior shrinkage toward the global error rate. |
+| `--no-aer-smooth` | False flag | Disables the default local smoothing of the error mapping. |
+| `--aer-monotonic` | `False` | Enforces a monotonic confidence-to-error mapping. |
+| `--aer-adaptive-binning` | `False` | Uses quantile-like adaptive bins instead of fixed-width bins. |
+| `--aer-confidence-metric` | `"auto"` | Which confidence signal to use. `auto` chooses the best available signal by cross-fitted Brier score. |
+| `--aer-nmin` | `1` | Minimum accepted sample count when choosing a risk-controlled threshold. |
+| `--aer-target-error` | `0.05` | Target error rate for risk-controlled summaries. |
+| `--aer-alpha` | `0.05` | Significance level used in the exact upper-bound calculation. |
+| `--aer-top-k` | `0` | If greater than 0, run AER only on the top-k tuned base models. `0` means all usable base models. |
+| `--no-preds` | False flag | Suppresses large per-sample AER output files and writes placeholders instead. |
 
-Simple single-target classification run with AER:
+
+## Confidence Metrics
+
+| Metric | Description |
+|--------|-------------|
+| `proba_margin` | Confidence from the margin between top class probabilities. |
+| `tree_vote_agreement` | Confidence from agreement among tree votes. |
+| `tree_leaf_support` | Confidence from leaf support in tree structures. |
+| `knn_vote` | Confidence from nearest-neighbor vote agreement. |
+| `knn_dist_weighted` | Confidence from distance-weighted KNN behavior. |
+| `knn_min_dist` | Confidence derived from nearest-neighbor distance. |
+| `auto` | Let the code choose the best available signal by cross-fitted Brier score. |
+
+
+## Usage Instructions
+
+1. Make sure the task is classification: use `--mode classify`.
+2. Add the flag `--adaptive-error`.
+3. Optionally limit the number of analyzed models with `--aer-top-k` if disk
+   space or runtime is a concern.
+4. Optionally enable `--aer-adaptive-binning` for a more balanced binning
+   strategy when confidence values are heavily skewed.
+5. Optionally set a deployment target with `--aer-target-error`, for example
+   `0.05` for a 5% error ceiling.
+6. Run the command and open the `adaptive_error` folder inside the run
+   directory.
+
+
+## Command Examples
+
+Simple run (single-target classification with AER):
 
 ```shell
 python df-analyze.py \
@@ -307,7 +288,7 @@ python df-analyze.py \
     --outdir ./out_aer_simple
 ```
 
-More explicit AER run with adaptive binning and a 5% target error rate:
+More explicit run (top models only, adaptive bins, 5% risk target):
 
 ```shell
 python df-analyze.py \
@@ -322,7 +303,7 @@ python df-analyze.py \
     --outdir ./out_aer_mid
 ```
 
-AER run with manual settings:
+Full-control run (manual AER settings):
 
 ```shell
 python df-analyze.py \
@@ -343,7 +324,7 @@ python df-analyze.py \
     --outdir ./out_aer_full
 ```
 
-Multi-target classification with per-target AER:
+Combined run (multi-target classification plus AER per target):
 
 ```shell
 python df-analyze.py \
@@ -360,249 +341,83 @@ python df-analyze.py \
     --outdir ./out_mt_aer
 ```
 
-# Analysis Pipeline
 
-## Multi-Target Analysis
+## Interpreting AER Outputs
 
-Relative to the single-target workflow, the multi-target path adds one key
-step: per-target results must be combined before final model tuning and
-evaluation.
+The base AER directory depends on whether the run is single-target or
+multi-target:
 
-The process is:
-
-1. load and preprocess the dataset, removing rows that violate the
-   multi-target target-cleaning rules
-2. compute per-target univariate association outputs and, when enabled,
-   per-target univariate prediction outputs
-3. perform per-target feature selection
-4. aggregate selected features across targets with `--mt-agg-strategy`
-   (`borda` or `freq`)
-5. optionally cap the aggregated set with `--mt-top-k`
-6. tune and evaluate multi-output models on the final feature set
-7. write overall and per-target performance reports
-8. if `--adaptive-error` is enabled for classification, run AER separately
-   for each target after the final multi-target evaluation
-
-## Adaptive Error Rate Pipeline
-
-AER is fit after the main classification model has already been selected and
-tuned. The current AER workflow is:
-
-1. refit the tuned model settings and build out-of-fold predictions on the
-   training portion
-2. build or normalize class probabilities, with optional external
-   calibration methods such as none, temperature scaling, Platt scaling,
-   isotonic, or one-vs-rest isotonic depending on the problem structure
-3. construct candidate confidence signals, including probability margin,
-   tree vote agreement, tree leaf support, nearest-neighbor vote agreement,
-   distance-weighted nearest-neighbor confidence, and nearest-neighbor
-   distance confidence
-4. if `--aer-confidence-metric auto` is used, choose the best available
-   confidence signal by the lowest cross-fitted Brier score for predicting
-   whether the model is wrong
-5. fit a confidence-to-expected-error mapping by binning out-of-fold
-   confidences, shrinking noisy bins toward the global error rate, smoothing
-   the curve by default, and optionally enforcing monotonicity
-6. apply the learned mapping to the holdout test set to produce one expected
-   error estimate per sample
-7. build risk-controlled operating points using exact one-sided
-   Clopper-Pearson style bounds with Bonferroni adjustment over scanned
-   thresholds
-
-# Program Outputs
-
-## Multi-Target Outputs
-
-The multi-target workflow adds the following outputs beyond the standard
-single-target directories:
-
-```text
-prepared/
-├── labels.parquet
-└── y.parquet
-
-features/
-├── associations/<target>/
-└── predictions/<target>/
-
-results/
-├── final_performances.csv
-├── final_performances_per_target.csv
-├── main_metric_by_target_<metric>.csv
-├── performance_long_table_per_target.csv
-├── results_report.md
-└── results_report_target_<target>.md
 ```
-
-- `prepared/y.parquet`
-  - Prepared target data after preprocessing. For classification, these are
-    encoded integers. For regression, these are scaled target values.
-- `prepared/labels.parquet`
-  - For multi-target classification, this stores one label map per target so
-    encoded integers can be translated back to original class labels.
-- `features/associations/<target>/`
-  - Per-target univariate association outputs.
-- `features/predictions/<target>/`
-  - Per-target univariate prediction outputs when prediction outputs are
-    enabled.
-- `results/results_report.md`
-  - Overall report for the final multi-output evaluation.
-- `results/results_report_target_<target>.md`
-  - Readable report for one target.
-- `results/final_performances.csv`
-  - Main aggregated performance table across targets. Depending on model and
-    task, this may also include joint metrics such as subset accuracy,
-    hamming loss, or multi-RMSE.
-- `results/final_performances_per_target.csv`
-  - Compact per-target performance summary.
-- `results/performance_long_table_per_target.csv`
-  - Long-form per-target metric table, usually the best file for detailed
-    comparison.
-- `results/main_metric_by_target_<metric>.csv`
-  - One key metric per target: `acc` for classification or `mae` for
-    regression.
-
-## Adaptive Error Rate Outputs
-
-The base AER directory is:
-
-```text
-Single-target classification:
+# Single-target classification:
 <outdir>/results/adaptive_error/
 
-Multi-target classification:
+# Multi-target classification:
 <outdir>/results/adaptive_error/<target_name>/
 ```
 
+
 ### Cross-Model Files
 
-These files summarize all analyzed AER models for a given target.
+| File | Description |
+|------|-------------|
+| `run_config.json` | Records the AER configuration, chosen models, and run metadata. Useful for reproducibility. |
+| `tables/models_ranked.csv` | Ranks the analyzed base models. Shows which models were included and where each model's folder lives. |
+| `tables/aer_metrics_by_model.csv` | Cross-model error-quality summary. Focus on `global_error_test`, `brier_error_test`, and `ece_error_test`. |
+| `plots/confidence_vs_expected_error_compare.png` | Visual comparison of confidence-to-error behavior across analyzed models. |
+| `predictions/test_per_sample_multi_model.csv` | One test row with multiple model-specific AER columns. Useful for comparing models on the same samples. |
 
-- `run_config.json`
-  - Records the AER configuration, chosen models, and run metadata.
-- `tables/models_ranked.csv`
-  - Ranks the analyzed base models and shows where each model's folder lives.
-- `tables/aer_metrics_by_model.csv`
-  - Cross-model error quality summary. Focus on `global_error_test`,
-    `brier_error_test`, and `ece_error_test`.
-- `plots/confidence_vs_expected_error_compare.png`
-  - Visual comparison of confidence-to-error behavior across analyzed models.
-- `predictions/test_per_sample_multi_model.csv`
-  - One test row with multiple model-specific AER columns for side-by-side
-    comparison.
 
-### Model-Specific Files
+### Per-Model AER Folder
 
-Within one model's AER folder, the most important outputs are:
+| File | Description |
+|------|-------------|
+| `metadata/proba_calibrator.json` | Which external probability calibration method was used. |
+| `metadata/confidence_metric_selection.json` | Which confidence signal was selected, and the Brier-score comparison among candidate signals. |
+| `metadata/adaptive_error_metrics.json` | Global error summary for the test set. Key fields: `global_error_test`, `brier_error_test`, `ece_error_test`. |
+| `tables/oof_confidence_error_bins.csv` | OOF bin summary used to fit the confidence-to-error mapping. |
+| `tables/test_confidence_error_bins.csv` | How the mapping behaves on the test set. |
+| `tables/test_error_reliability_bins.csv` | Reliability table used for calibration-style error analysis. |
+| `tables/coverage_accuracy_curve.csv` | Coverage vs. selective accuracy as samples are accepted in order of lower predicted risk. |
+| `tables/coverage_summary.csv` | Short summary of a few operating points from the full coverage curve. |
+| `tables/clinician_view.csv` | Practical table with row ID, true label, predicted label, `aer_pct`, and whether the row exceeds the target error. |
+| `predictions/oof_per_sample.csv` | Row-level OOF diagnostic file. Good for checking how the mapping was learned. |
+| `predictions/test_per_sample.csv` | Row-level test file. Main per-sample output for end users. |
+| `reports/clinician_view.md` | Simplified markdown report for non-technical readers. |
 
-- `metadata/proba_calibrator.json`
-  - External probability calibration method used for the model.
-- `metadata/confidence_metric_selection.json`
-  - Winning confidence signal, with the Brier-score comparison among
-    candidate signals.
-- `metadata/adaptive_error_metrics.json`
-  - Global error summary for the test set. The key fields are
-    `global_error_test`, `brier_error_test`, and `ece_error_test`.
-- `tables/oof_confidence_error_bins.csv`
-  - Out-of-fold bin summary used to fit the mapping.
-- `tables/test_confidence_error_bins.csv`
-  - How the learned mapping behaves on the test set.
-- `tables/test_error_reliability_bins.csv`
-  - Reliability table used for calibration-style error analysis.
-- `tables/coverage_accuracy_curve.csv`
-  - Coverage versus selective accuracy as samples are accepted in order of
-    lower predicted risk.
-- `tables/coverage_summary.csv`
-  - Short summary of operating points from the full coverage curve.
-- `tables/clinician_view.csv`
-  - Practical summary with `row_id`, true label, predicted label, `aer_pct`,
-    and whether the row exceeds the target error.
-- `predictions/oof_per_sample.csv`
-  - Row-level out-of-fold diagnostic file used to inspect how the mapping was
-    learned.
-- `predictions/test_per_sample.csv`
-  - Main row-level AER output for the holdout test set.
-- `reports/clinician_view.md`
-  - Simplified markdown report for non-technical readers.
 
-### Key Columns and Metrics
+### Columns in `test_per_sample.csv`
 
-The main columns in `predictions/test_per_sample.csv` are:
+| Column | Description |
+|--------|-------------|
+| `row_id` | Original row index carried into the output. |
+| `y_true` / `y_pred` | Encoded true and predicted class IDs. |
+| `y_true_label` / `y_pred_label` | Decoded class labels when a label map is available. |
+| `correct` | `1` if the prediction is correct, else `0`. |
+| `confidence` | The selected confidence signal after any transformation. |
+| `aer` | Estimated sample-level error probability. |
+| `aer_pct` | The same estimated error expressed as a percentage. |
+| `flag_gt_target_error` | `1` if `aer` is greater than or equal to the chosen `--aer-target-error`. |
+| `p_max`, `p_2nd`, `p_margin` | Probability diagnostics from calibrated class probabilities. |
+| `p_pred`, `p_pred_margin` | Probability diagnostics tied to the predicted class. |
 
-- `row_id`
-  - Original row index carried into the output.
-- `y_true` / `y_pred`
-  - Encoded true and predicted class IDs.
-- `y_true_label` / `y_pred_label`
-  - Decoded class labels when a label map is available.
-- `correct`
-  - `1` if the prediction is correct, otherwise `0`.
-- `confidence`
-  - Selected confidence signal after any transformation.
-- `aer`
-  - Estimated sample-level error probability.
-- `aer_pct`
-  - The same estimated error, shown as a percentage.
-- `flag_gt_target_error`
-  - `1` if `aer` is greater than or equal to the chosen
-    `--aer-target-error`.
-- `p_max`, `p_2nd`, `p_margin`
-  - Probability diagnostics from calibrated class probabilities.
-- `p_pred`, `p_pred_margin`
-  - Probability diagnostics tied to the predicted class.
 
-The main summary metrics are:
+### Key Metrics
 
-- `global_error_test`
-  - Ordinary test-set error rate of the classifier.
-- `brier_error_test`
-  - Mean squared error between predicted sample-level error probabilities and
-    actual incorrect/correct outcomes. Smaller is better.
-- `ece_error_test`
-  - Calibration-style expected calibration error for the predicted error
-    probabilities. Smaller is better.
+| Metric | Description |
+|--------|-------------|
+| `global_error_test` | The ordinary test-set error rate of the classifier. This is the baseline before any selective filtering. |
+| `brier_error_test` | Mean squared error between the predicted sample-level error probabilities and the actual correct/incorrect outcomes. Smaller is better. |
+| `ece_error_test` | Calibration-style expected calibration error for the predicted error probabilities. Smaller is better. |
 
-# Limitations
 
-## Multi-Target Constraints
+## Troubleshooting
 
-- All targets in one run must share the same `--mode`.
-- Rows with missing target values are removed before analysis.
-- Rare classes can trigger additional row removal in multi-target
-  classification, and remaining rare classes may still make downstream
-  cross-validation unstable.
-- Feature aggregation is currently limited to `borda` and `freq`.
-- Omitting `--mt-top-k` does not preserve all aggregated features. In the
-  current implementation it triggers automatic top-k selection.
-
-## Adaptive Error Rate Constraints
-
-- AER currently runs only for classification tasks.
-- AER is skipped if only a Dummy model survives tuning.
-- If `--no-preds` is used, large per-sample AER files are intentionally
-  suppressed.
-- If no AER folder appears, first confirm that the run was classification and
-  that at least one non-Dummy model survived tuning.
-- If the confidence-to-error plot is noisy, try
-  `--aer-adaptive-binning` or a slightly larger `--aer-min-bin-count`.
-
-# Currently Implemented Program Features and Analyses
-
-## Completed Features
-
-### Multi-Target Prediction
-
-- Multi-output classification and regression through `--targets`
-- Per-target feature selection combined by `borda` or `freq`
-- Overall and per-target performance reports
-- Optional final feature cap through `--mt-top-k`
-- Per-target association and prediction directories
-
-### Adaptive Error Estimation
-
-- Sample-level expected error estimates for classification predictions
-- Cross-fitted confidence signal selection through `--aer-confidence-metric auto`
-- Confidence-to-error mapping with shrinkage, smoothing, and optional
-  monotonicity
-- Risk-controlled coverage summaries based on a target error level
-- Per-sample CSV outputs and a clinician-facing markdown report
+- If no `adaptive_error` folder appears, check whether the run accidentally
+  used `--mode regress` instead of `--mode classify`.
+- If no AER folders appear at all, check whether only `Dummy` in the
+  earlier tuning stages; AER is skipped in that case.
+- If per-sample outputs are missing, check whether `--no-preds` was passed. The
+  code intentionally writes placeholder files instead of full CSV or Parquet
+  outputs when that flag is set.
+- If the confidence vs. error plot looks noisy, try enabling
+  `--aer-adaptive-binning` or increasing `--aer-min-bin-count` slightly.
